@@ -43,7 +43,16 @@ IMPORTANT RULES:
    match many different counties/states and there is no city-level lookup
    table available). If the question asks about a city or town rather than
    a full state or county name, respond with exactly: ERROR_CITY_NOT_SUPPORTED
-10. Respond with ONLY the raw SQL query and nothing else - no explanation,
+10. If the question names a county WITHOUT specifying which state, and that
+    county name commonly exists in multiple US states (e.g. "Washington
+    County", "Franklin County", "Jefferson County" all exist in a dozen+
+    states each), do NOT guess which one. Instead respond with exactly:
+    CLARIFY: <a natural, specific question asking which state, ideally
+    naming 2-4 of the actual states where that county exists>
+    Example: CLARIFY: There are several Washington Counties in the US -
+    did you mean the one in Oregon, Pennsylvania, Maryland, or another
+    state?
+11. Respond with ONLY the raw SQL query and nothing else - no explanation,
     no commentary, no markdown formatting, before or after the query.
     Your entire response must be valid SQL that can be executed as-is.
 
@@ -69,7 +78,7 @@ When generating queries:
             # Clean up query (remove markdown code blocks if present)
             query = self._clean_query(query)
 
-            if query in ('ERROR_UNANSWERABLE', 'ERROR_CITY_NOT_SUPPORTED'):
+            if query in ('ERROR_UNANSWERABLE', 'ERROR_CITY_NOT_SUPPORTED') or query.startswith('CLARIFY:'):
                 return query
             
             # Validate query syntax

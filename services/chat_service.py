@@ -35,6 +35,13 @@ class ChatService:
             # Step 2: Generate SQL query
             sql_query = self.query_gen.generate_query(user_message, conversation_history)
 
+            if sql_query and sql_query.startswith('CLARIFY:'):
+                clarifying_question = sql_query[len('CLARIFY:'):].strip()
+                return {
+                    'response': clarifying_question,
+                    'query_executed': False
+                }
+
             if sql_query == 'ERROR_CITY_NOT_SUPPORTED':
                 return {
                     'response': "This dataset only has population data at the state and county "
