@@ -12,6 +12,28 @@ class TestContextAwareTopicFilter(unittest.TestCase):
     def setUp(self):
         self.validator = DataValidator()
 
+    def test_pop_abbreviation_accepted_as_first_message(self):
+        """Regression test for a real bug found via incognito testing:
+        'pop of florida' as the very FIRST message in a fresh conversation
+        (no context to lean on) was rejected as off-topic, since the
+        filter only recognized the full word 'population', not the
+        common abbreviation 'pop'. Fixed by adding 'pop' as a whole-word
+        synonym with word-boundary matching."""
+        self.assertTrue(
+            self.validator.is_on_topic("pop of florida", has_context=False)
+        )
+        self.assertTrue(
+            self.validator.is_on_topic("pop of texas", has_context=False)
+        )
+
+    def test_pop_abbreviation_does_not_false_positive(self):
+        """Word-boundary matching must not let 'pop' match inside
+        unrelated words like 'popular' - this is what makes it safe to
+        add 'pop' as a short keyword in the first place."""
+        self.assertFalse(
+            self.validator.is_on_topic("what's popular in movies", has_context=False)
+        )
+
     def test_followup_accepted_with_prior_context(self):
         """The exact bug found in manual testing: a short follow-up
         question should be accepted when there's an ongoing census
