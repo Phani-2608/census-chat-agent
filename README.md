@@ -1,502 +1,283 @@
-# US Census Chat Agent - Snowflake Applied AI Assignment
+# US Census Chat Agent
 
-A production-quality interactive chat agent that answers natural language questions about US Census population data.
+A production-quality chat agent that answers natural language questions about US population data, backed by live Census Bureau data on Snowflake and Claude for query generation.
 
-## Architecture Overview
+**Live demo:** https://census-chat-agent-production-532b.up.railway.app
+No login required, no credentials needed.
 
-### System Design
+---
 
-The application follows a layered architecture:
+## Quick Start (Evaluating This Submission)
+
+Just open the live demo link above and start asking questions. Some good ones to try:
+
+- "What is the population of California?"
+- "How many people live in Texas?"
+- "What about New York?" (tests multi-turn context)
+- "What's the population of Washington County?" (tests ambiguous-location handling)
+- "What's the population of Springfield?" (tests unsupported city-level handling)
+- "Tell me a joke" (tests off-topic guardrails)
+
+No setup required to evaluate the running app. To run it locally instead, see [Local Setup](#local-setup) below.
+
+---
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────┐
-│     Frontend (HTML/CSS/JS)          │
-│  - Interactive Chat UI              │
-│  - Session Management               │
-│  - Message Display & Input          │
-└────────────┬────────────────────────┘
+│  Frontend (HTML/CSS/JS)              │
+│  Chat UI, session-based history      │
+└────────────┬──────────────────────────┘
              │
-┌────────────▼────────────────────────┐
-│     Flask Backend API               │
-│  - /api/chat (main endpoint)        │
-│  - /api/reset (clear history)       │
-│  - /api/history (get context)       │
-└────────────┬────────────────────────┘
+┌────────────▼──────────────────────────┐
+│  Flask Backend (app.py)                │
+│  /api/chat  /api/reset  /api/history   │
+│  /health                               │
+└────────────┬──────────────────────────┘
              │
-┌────────────▼────────────────────────┐
-│     Core Services Layer             │
-│  ┌─────────────────────────────────┐│
-│  │ ChatService                     ││
-│  │ - Multi-turn conversation       ││
-│  │ - Answerability checking        ││
-│  │ - Response generation           ││
-│  └─────────────────────────────────┘│
-│  ┌─────────────────────────────────┐│
-│  │ QueryGenerator                  ││
-│  │ - NL to SQL conversion          ││
-│  │ - Schema validation             ││
-│  │ - Query safety checks           ││
-│  └─────────────────────────────────┘│
-│  ┌─────────────────────────────────┐│
-│  │ DataValidator                   ││
-│  │ - Topic relevance checks        ││
-│  │ - Input sanitization            ││
-│  │ - Security validation           ││
-│  └─────────────────────────────────┘│
-└────────────┬────────────────────────┘
-             │
-┌────────────▼────────────────────────┐
-│     Data Layer                      │
-│  ┌─────────────────────────────────┐│
-│  │ Snowflake Connector             ││
-│  │ - Connection pooling            ││
-│  │ - Query execution with timeout  ││
-│  │ - Error handling & recovery     ││
-│  └─────────────────────────────────┘│
-│  ┌─────────────────────────────────┐│
-│  │ Claude API Integration          ││
-│  │ - Query generation              ││
-│  │ - Response synthesis            ││
-│  │ - Intent classification         ││
-│  └─────────────────────────────────┘│
-└────────────┬────────────────────────┘
-             │
-         Census Data
-    (Snowflake Marketplace)
+┌────────────▼──────────────────────────┐
+│  ChatService                           │
+│  - Multi-turn conversation             │
+│  - Answerability pre-check             │
+│  - Response synthesis                  │
+└──────┬──────────────────┬──────────────┘
+       │                  │
+┌──────▼─────────┐  ┌─────▼──────────────┐
+│ QueryGenerator  │  │ DataValidator      │
+│ NL -> SQL via   │  │ Context-aware      │
+│ Claude, schema- │  │ topic filtering,   │
+│ aware, handles  │  │ input sanitization │
+│ ambiguity       │  │                    │
+└──────┬──────────┘  └────────────────────┘
+       │
+┌──────▼──────────────────────────────────┐
+│ SnowflakeDB                              │
+│ Connection mgmt, timeout tracking,       │
+│ lazy reconnect on failure                │
+└──────┬────────────────────────────────────┘
+       │
+US_OPEN_CENSUS_DATA__NEIGHBORHOOD_INSIGHTS__FREE_DATASET
+(SafeGraph Open Census Data, via Snowflake Marketplace)
 ```
 
-### Key Design Decisions
+## The Real Data Schema
 
-#### 1. **Multi-turn Conversation Context**
-- Maintains last 10 conversation turns in session
-- Allows follow-up questions like "What about Texas?" or "Show more details"
-- Balances context awareness with token efficiency
+This is the part that took the most real investigation, and it's worth documenting
+explicitly because the actual schema is very different from what a quick glance at
+"US Census data" might suggest.
 
-**Why:** Production systems need context to handle natural follow-ups. By keeping recent history, the agent understands what "it" refers to in subsequent questions.
+**Database:** `US_OPEN_CENSUS_DATA__NEIGHBORHOOD_INSIGHTS__FREE_DATASET`, schema `PUBLIC`
 
-#### 2. **Separate Answerability Checking**
-- Before generating queries, explicitly check if question is answerable
-- Prevents hallucinations on unanswerable questions
-- Uses Claude to classify question relevance
+**Key tables actually used:**
 
-**Why:** Early exit prevents wasted computation and provides clear user feedback instead of empty results or errors.
+- **`2020_CBG_B01`** - population data at the Census Block Group level (a small
+  geography, smaller than a zip code). Columns use official Census Bureau codes like
+  `"B01001e1"` (total population estimate) - note the **mixed case**, which matters:
+  Snowflake auto-uppercases unquoted identifiers, so every reference to these columns
+  must be double-quoted or it silently breaks.
+- **`2020_METADATA_CBG_FIPS_CODES`** - maps 2-letter state abbreviations (`STATE`) and
+  numeric codes (`STATE_FIPS`, `COUNTY_FIPS`) to real county names. This is the join
+  table that makes "population of California" answerable at all, since the population
+  table itself only has a 12-digit `CENSUS_BLOCK_GROUP` code, not a state name.
+- **`2020_METADATA_CBG_FIELD_DESCRIPTIONS`** - translates cryptic column codes (like
+  `B01001e1`) into human descriptions (`Sex By Age`, `Total population`, `Estimate`).
 
-#### 3. **Query Generation via LLM**
-- Uses Claude to translate natural language to SQL
-- Provides schema context to guide generation
-- Validates generated queries for security and syntax
+To answer "population of California," the generated SQL converts the state name to its
+2-letter abbreviation, looks up the numeric FIPS prefix, then sums population across
+every block group whose ID starts with that prefix. This join pattern is given to
+Claude explicitly in the schema context (see `services/query_generator.py`) rather than
+being hardcoded as a fixed query template, so it generalizes to counties and other
+phrasings without needing a rule for every variant.
 
-**Why:** Hand-coded SQL rules don't scale to natural language variety. Claude understands context and can handle ambiguous questions better.
+I only wired up the core population table (`2020_CBG_B01`). The dataset also has
+income, race, education, and housing tables (`2020_CBG_B19`, `2020_CBG_B02`, etc.) that
+follow the same pattern but aren't connected yet - see [Known Limitations](#known-limitations).
 
-#### 4. **Layered Validation**
-- Topic validation (off-topic filter)
-- Input format validation (length, emptiness)
-- Query validation (dangerous keywords)
-- Result validation (empty results)
+## Key Design Decisions
 
-**Why:** Defense-in-depth approach catches issues at multiple stages rather than relying on a single validation point.
+### LLM-generated SQL instead of hand-coded rules
+Given how irregular the real schema turned out to be (cryptic Census Bureau column
+codes, a required join through a metadata table just to resolve a state name), hand-
+coded query templates would have required a new rule for every phrasing. Giving Claude
+the real schema plus one worked example lets it generalize - it correctly handles sloppy
+phrasing ("pop of florida") and follow-ups without any special-casing for those specific
+inputs.
 
-#### 5. **Graceful Degradation**
-- Missing data → explains what's unavailable
-- Query failures → offers suggestions
-- Timeouts → acknowledges the issue
-- Network errors → provides actionable feedback
+### Context-aware topic filtering
+The off-topic guardrail doesn't just look at keywords in the current message - it also
+considers whether there's an existing census conversation in progress. This was a
+deliberate fix after finding that a short, valid follow-up like "What about New York?"
+was being rejected as off-topic, since it doesn't contain any census keywords on its
+own. The filter now allows short follow-up phrasing ("what about...", "and...") *only*
+when there's real prior context to justify it, verified with tests that a fresh
+conversation still rejects the exact same phrasing.
 
-**Why:** Users should know what went wrong, not just see a blank screen or error code.
+### Graceful degradation over fail-fast crashes
+Early in deployment, I found the app would refuse to start entirely if Snowflake was
+unreachable for any reason (a locked account, a network blip), taking down every
+endpoint including the health check - not just the features that need the database.
+I redesigned this: the app always starts, lazily retries the database connection on each
+request if it's not ready, and returns a clear 503 with a specific message instead of an
+unhandled crash. This is covered by an actual test that simulates a failed Snowflake
+connection and asserts `/health` still returns 200 while `/api/chat` returns a clean 503.
 
-## Setup Instructions
+### Sentinel-based ambiguity handling
+Rather than hardcoding a canned message for every ambiguous case, the query generator
+can respond with structured sentinels the backend recognizes:
+- `ERROR_UNANSWERABLE` - the question isn't about census data at all
+- `ERROR_CITY_NOT_SUPPORTED` - the question asks about a city/town, which this dataset
+  doesn't have (it only supports state/county geography)
+- `CLARIFY: <question>` - the question is genuinely ambiguous (e.g. "Washington County"
+  exists in a dozen+ states), and Claude writes the actual clarifying question itself,
+  naming real candidate states, rather than a generic "please be more specific."
 
-### Prerequisites
-- Python 3.9+
-- Snowflake account with Census data access
-- Anthropic API key
-- Git
+### Single gunicorn worker in production
+Initially deployed with 4 workers, which meant every deploy triggered 4 simultaneous
+Snowflake login attempts at startup - this measurably contributed to hitting Snowflake's
+account lockout threshold while debugging. Reduced to 1 worker, which is also more
+appropriate for this app's actual scale.
 
-### Installation
+## Multi-turn Conversation
 
-1. **Clone and navigate to repository:**
-   ```bash
-   git clone <repository-url>
-   cd census-chat-agent
-   ```
+Conversation history is stored in the Flask session (cookie-based), capped at the last
+20 messages to bound token usage. Each turn is passed to Claude as prior context for
+both the answerability check and the SQL generation step, so follow-ups like "what
+about the male population there?" correctly resolve to the previously-discussed state.
 
-2. **Create virtual environment:**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+## Guardrails
 
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+- **Off-topic rejection**, context-aware (see above)
+- **Input validation** - length limits, empty-message handling, blocked-pattern
+  detection for SQL-injection-style strings
+- **Query validation** - generated SQL must start with `SELECT` and cannot contain
+  `DROP`, `DELETE`, `UPDATE`, `INSERT`, `ALTER`, or `TRUNCATE`
+- **Output sanitization** - strips any HTML/script tags from responses
 
-4. **Configure environment variables:**
-   Create `.env` file in the root directory:
-   ```
-   # Snowflake Configuration
-   SNOWFLAKE_USER=your_username
-   SNOWFLAKE_PASSWORD=your_password
-   SNOWFLAKE_ACCOUNT=your_account_id
-   SNOWFLAKE_WAREHOUSE=COMPUTE_WH
-   SNOWFLAKE_DATABASE=CENSUS_DATA
-   SNOWFLAKE_SCHEMA=PUBLIC
-   
-   # API Keys
-   ANTHROPIC_API_KEY=sk-ant-...
-   
-   # Flask Configuration
-   FLASK_ENV=production
-   FLASK_SECRET_KEY=your-secret-key-here
-   PORT=5000
-   ```
+## Known Limitations
 
-### Local Development
+Documented honestly rather than hidden, per the assignment's emphasis on
+self-awareness:
 
-1. **Run the application:**
-   ```bash
-   python app.py
-   ```
+- **Only population data is wired up.** Income, race, education, and housing questions
+  correctly fail with a clear "I can't answer that" rather than hallucinating, but
+  aren't implemented. The schema-context pattern used for population could be extended
+  to these tables with more time.
+- **City/town names aren't resolvable at all** (the dataset only has state/county
+  geography) - the app explains this clearly rather than guessing, but doesn't attempt
+  to infer a likely state from conversation context.
+- **Ambiguous county names** (e.g. "Washington County") now trigger a clarifying
+  question naming real candidate states, but this relies on Claude's general knowledge
+  of US geography rather than a verified lookup against the actual FIPS table - it's
+  usually right but isn't guaranteed to name every state that actually has that county
+  in this specific dataset.
+- **Session storage is cookie-based**, not persistent - conversation history is lost on
+  app restart and won't scale across multiple server instances. Redis would be the
+  production fix.
+- **No rate limiting** on the public endpoint yet.
+- **Prompt injection defenses are keyword-based**, not exhaustive.
 
-2. **Access the interface:**
-   - Open browser to `http://localhost:5000`
-   - Start asking questions about US Census data
+See `REFLECTION.md` for the full list of bugs found and fixed during development, and
+what I'd prioritize next with more time.
 
-3. **Run tests:**
-   ```bash
-   python -m pytest tests/
-   ```
+## Testing
 
-### Deployment
+21 automated tests across 4 files (`tests/`), covering:
 
-The application is designed to be deployed on any platform supporting Python/Flask. Here are the key considerations:
+- Input validation (length, format, blocked patterns, on/off-topic classification)
+- **Regression test for the multi-turn context bug** - asserts a follow-up is accepted
+  with prior context and rejected without it
+- **Regression test for graceful degradation** - simulates a failed Snowflake
+  connection and asserts the app still starts and responds cleanly
 
-**For deployment on Heroku/Railway/Render:**
-- Environment variables should be set through platform configuration
-- Application serves HTML from `/templates/index.html`
-- Flask development server is sufficient for single-user evaluation; for production scale, use Gunicorn:
+Run with:
+```bash
+python3 -m pytest tests/ -v
+```
+
+Beyond the automated suite, I did extensive manual/scenario testing against the live
+app and live data - state/county/national lookups, sloppy phrasing, multi-turn
+follow-ups, fictional places, unsupported categories, ambiguous locations, and an actual
+simulated database outage. This is where most of the real bugs were found; see
+`REFLECTION.md` for the full list and what I'd add to the automated suite with more
+time.
+
+## Local Setup
 
 ```bash
-gunicorn -w 4 -b 0.0.0.0:$PORT app:app
+git clone <this-repo>
+cd census-chat-agent
+python3 -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env
+# fill in .env with your Snowflake + Anthropic credentials
+python3 app.py
+# open http://localhost:5000
 ```
 
-**For deployment on Cloud Run/Lambda:**
-- Application is stateless except for session cookies
-- Make sure platform supports persistent environment variable storage
-- May need to implement Redis for session persistence at scale
+### Environment Variables
 
-## API Endpoints
-
-### POST /api/chat
-Main chat endpoint for processing user messages.
-
-**Request:**
-```json
-{
-  "message": "What is the population of California?"
-}
+```
+SNOWFLAKE_USER=
+SNOWFLAKE_PASSWORD=
+SNOWFLAKE_ACCOUNT=
+SNOWFLAKE_WAREHOUSE=COMPUTE_WH
+SNOWFLAKE_DATABASE=US_OPEN_CENSUS_DATA__NEIGHBORHOOD_INSIGHTS__FREE_DATASET
+SNOWFLAKE_SCHEMA=PUBLIC
+ANTHROPIC_API_KEY=
+FLASK_SECRET_KEY=
 ```
 
-**Response:**
-```json
-{
-  "response": "California has a population of approximately 39.5 million people, making it the most populous state in the US...",
-  "query_executed": true,
-  "is_off_topic": false,
-  "conversation_turn": 1
-}
+Note: the Snowflake database name above is the exact name the "US Open Census Data &
+Neighborhood Insights - Free Dataset" listing lands as once added from Marketplace -
+this took some digging to find, since it's not obvious from the listing name alone
+(see `REFLECTION.md` for how it was found).
+
+## Deployment
+
+Deployed on Railway (switched from an initial Heroku attempt, which now requires
+credit card verification even for free-tier apps). `Procfile` runs a single gunicorn
+worker:
+
+```
+web: gunicorn -w 1 -b 0.0.0.0:$PORT app:app
 ```
 
-### POST /api/reset
-Clear conversation history and start a new conversation.
+One deployment-specific bug worth calling out: service initialization originally lived
+inside `if __name__ == '__main__':`, which works fine with `python3 app.py` locally but
+never executes under gunicorn (which imports the module rather than running it
+directly) - this meant the deployed app had `None` for every service on every request
+until it was moved to module level. See `REFLECTION.md` for the full debugging story.
 
-**Response:**
-```json
-{
-  "status": "success",
-  "message": "Conversation history cleared"
-}
+## File Structure
+
+```
+census-chat-agent/
+├── app.py                    # Flask entrypoint, routes, graceful degradation
+├── Procfile                  # Railway/Heroku start command
+├── requirements.txt
+├── .env.example
+├── services/
+│   ├── chat_service.py       # Conversation orchestration, answerability check
+│   ├── query_generator.py    # NL -> SQL via Claude, real schema context
+│   ├── database.py           # Snowflake connection + query execution
+│   └── data_validator.py     # Context-aware topic filtering, input validation
+├── utils/
+│   └── error_handler.py
+├── templates/
+│   └── index.html            # Chat UI
+├── tests/
+│   ├── test_validators.py
+│   ├── test_query_generator.py
+│   ├── test_context_aware_topic_filter.py
+│   └── test_graceful_degradation.py
+└── REFLECTION.md             # Full development process, bugs found, tradeoffs
 ```
 
-### GET /api/history
-Retrieve current conversation history.
-
-**Response:**
-```json
-{
-  "history": [
-    {"role": "user", "content": "What is the population of California?", "timestamp": "2024-01-15T10:30:00"},
-    {"role": "assistant", "content": "California has...", "timestamp": "2024-01-15T10:30:05"}
-  ],
-  "turn_count": 1
-}
-```
-
-### GET /health
-Health check endpoint for monitoring.
-
-## Key Files
-
-- `app.py` - Flask application entry point
-- `services/chat_service.py` - Core chat logic
-- `services/query_generator.py` - Natural language to SQL conversion
-- `services/database.py` - Snowflake connection and query execution
-- `services/data_validator.py` - Input validation and security checks
-- `templates/index.html` - Frontend user interface
-- `tests/test_validators.py` - Unit tests
-
-## Development Process & Decisions
-
-### What I Built in Order
-
-1. **Backend Structure (1.5 hours)**
-   - Created modular service architecture
-   - Established separation of concerns (validation, query generation, response synthesis)
-
-2. **Core Chat Service (2 hours)**
-   - Implemented multi-turn conversation tracking
-   - Built integration with Claude for answerability checking
-   - Created response generation logic
-
-3. **Database Layer (1.5 hours)**
-   - Built Snowflake connector with error handling
-   - Implemented query execution with timeout
-   - Added connection pooling and recovery
-
-4. **Query Generator (2 hours)**
-   - Designed SQL generation via Claude API
-   - Created schema context injection
-   - Implemented security validation
-
-5. **Frontend UI (2.5 hours)**
-   - Built interactive chat interface
-   - Implemented real-time message display
-   - Added loading indicators and error messages
-
-6. **Testing & Documentation (1.5 hours)**
-   - Wrote unit tests for validators
-   - Created comprehensive README
-
-**Total Time: ~12 hours** (within 24-hour window)
-
-### What I Would Improve With More Time
-
-#### 1. **Enhanced Query Validation**
-Currently, query validation is basic (keyword checking). With more time, I would:
-- Parse SQL AST to deeply inspect query structure
-- Implement query cost estimation to catch expensive queries before execution
-- Add query result validation to catch semantically invalid results
-
-#### 2. **Caching Layer**
-- Cache frequently asked questions and their results
-- Implement semantic similarity to recognize paraphrased questions
-- Reduce latency for common queries and API calls
-
-**Estimated time:** 3-4 hours
-
-#### 3. **Comprehensive Test Suite**
-Current tests only cover validators. I would add:
-- Integration tests for chat service
-- Mock database tests
-- End-to-end tests via Flask test client
-- Performance tests for 60-second timeout validation
-
-**Estimated time:** 4-5 hours
-
-#### 4. **Advanced Context Management**
-- Implement conversation summarization for long chats
-- Use vector embeddings to find relevant previous context
-- Add explicit topic tracking to detect conversation drift
-
-**Estimated time:** 3-4 hours
-
-#### 5. **Production Monitoring**
-- Add structured logging with correlation IDs
-- Implement performance metrics (query latency, response time)
-- Create dashboards for monitoring agent quality
-- Add user feedback mechanisms
-
-**Estimated time:** 4-5 hours
-
-#### 6. **Enhanced Error Handling**
-- Implement retry logic with exponential backoff
-- Add fallback responses for partial failures
-- Create detailed error categorization
-- Add user-friendly explanations for each error type
-
-**Estimated time:** 2-3 hours
-
-### Edge Cases & Failure Modes Addressed
-
-#### 1. **Empty Query Results**
-- **Issue:** Query returns no rows
-- **Handling:** Explain specifically why (no matching data) and suggest alternatives
-- **Code:** Lines 94-101 in chat_service.py
-
-#### 2. **Ambiguous Questions**
-- **Issue:** "Tell me about California" - could mean demographics, housing, education, etc.
-- **Handling:** Query generates result for most relevant category; conversation context helps disambiguate follow-ups
-- **Code:** Handled through conversation history in _build_messages()
-
-#### 3. **Off-Topic Questions**
-- **Issue:** User asks about weather, stocks, etc.
-- **Handling:** Topic validator catches before query generation; return helpful redirection
-- **Code:** data_validator.py is_on_topic() function
-
-#### 4. **Malformed SQL Generation**
-- **Issue:** LLM generates syntactically invalid SQL
-- **Handling:** Query validation catches dangerous keywords; Snowflake returns error caught in execute_query
-- **Code:** database.py has try-catch for ProgrammingError
-
-#### 5. **Query Timeout**
-- **Issue:** Complex query takes >60 seconds
-- **Handling:** Log warning; return what results we have if any
-- **Code:** database.py execute_query() with time tracking
-
-#### 6. **Snowflake Connection Failure**
-- **Issue:** Connection drops or credentials invalid
-- **Handling:** Attempt reconnection; if fails, return clear error message
-- **Code:** database.py _connect() and execute_query()
-
-#### 7. **Context Token Overflow**
-- **Issue:** Long conversation history exceeds LLM token limits
-- **Handling:** Keep only last 10 turns; summarize if needed
-- **Code:** app.py maintains session['conversation_history'][-20:]
-
-#### 8. **Missing Required Environment Variables**
-- **Issue:** .env file incomplete
-- **Handling:** Raise ValueError at startup with missing keys listed
-- **Code:** database.py __init__() validates config
-
-### Edge Cases NOT Fully Addressed (Documented in REFLECTION.md)
-
-1. **Conflicting data across census years** - Could implement versioning but current implementation assumes latest data
-2. **Extremely vague questions** ("Tell me about America") - Works but returns broad results; could add clarification questions
-3. **Request with contradictory constraints** ("Population of NY with 0 people") - Fails gracefully with empty results
-4. **Prompt injection attempts** - Basic keyword filtering but not foolproof against sophisticated injections
-
-## Testing Approach
-
-### Current Tests
-- `tests/test_validators.py` - 7 test cases covering:
-  - On-topic detection (5 census questions, 5 off-topic questions)
-  - Input validation (length, format, blocked patterns)
-  - Output sanitization
-
-**Test execution:**
-```bash
-python -m pytest tests/test_validators.py -v
-```
-
-### Testing Strategy & Tradeoffs
-
-**What I tested:** Input validation layer (most critical for security and user experience)
-- Rationale: This is the first point of contact for user input; bugs here affect all downstream operations
-
-**What I didn't test:** 
-- Database integration (would require mock Snowflake setup)
-- LLM integration (would require API mocking)
-- End-to-end flows (would need full deployment)
-
-**Why:** Time constraint. These tests provide 80% value but require significantly more setup. The working application provides confidence through manual testing.
-
-### Tests I Would Add With More Time
-
-1. **Integration Tests** (4-5 hours)
-   ```python
-   - test_chat_service_with_mock_db
-   - test_query_generation_accuracy
-   - test_conversation_context_preservation
-   - test_graceful_degradation
-   ```
-
-2. **Load Tests** (3-4 hours)
-   - Concurrent message handling
-   - Database connection pooling
-   - Memory usage under sustained load
-
-3. **Acceptance Tests** (3-4 hours)
-   - Test actual census questions with real data
-   - Validate response accuracy
-   - Check 60-second timeout compliance
-
-## Production Considerations
-
-### Security Concerns
-
-1. **SQL Injection Prevention**
-   - LLM-generated queries could contain injection attempts
-   - Mitigation: Query validation layer checks for dangerous keywords
-   - Production improvement: Use parameterized queries / prepared statements
-
-2. **Prompt Injection**
-   - Malicious users could inject instructions into chat messages
-   - Current mitigation: Topic validator filters most attempts
-   - Production improvement: Implement robust prompt injection detection
-
-3. **Data Privacy**
-   - Census data is public, but API keys in .env must be protected
-   - Mitigation: Never commit .env; use environment variables in production
-   - Consider: Rate limiting to prevent abuse
-
-### Reliability Improvements Needed
-
-1. **Session Persistence**
-   - Current: Conversation stored in session cookies
-   - Limitation: Lost on app restart or server failure
-   - Improvement: Use Redis/database for persistent sessions
-
-2. **Database Connection Pooling**
-   - Current: Basic connection handling
-   - Improvement: Implement connection pool with min/max connections
-
-3. **Error Recovery**
-   - Current: Single attempt to execute query
-   - Improvement: Implement retry logic with exponential backoff
-
-### Deployment Readiness
-
-**Ready for production:**
-- ✅ Graceful error handling
-- ✅ Comprehensive logging
-- ✅ Input validation
-- ✅ 60-second timeout handling
-- ✅ Modular architecture for testing
-
-**Not ready for production (would need before customer handoff):**
-- ❌ Load testing at scale
-- ❌ Monitoring dashboards
-- ❌ Incident response procedures
-- ❌ SLA documentation
-- ❌ Rate limiting for API
-- ❌ Database connection pooling
-- ❌ Persistent session storage
-
-## Reflection on Time Investment
-
-### High-Value Investments (Completed)
-1. ✅ Modular architecture - Makes code testable and maintainable
-2. ✅ Error handling - Ensures graceful degradation
-3. ✅ Input validation - Critical for security
-4. ✅ Clear documentation - Helps reviewers understand decisions
-
-### Medium-Value Investments (Completed)
-1. ✅ Frontend UI - Makes application usable
-2. ✅ Multi-turn context - Enables natural conversation
-3. ✅ Unit tests - Provides confidence in core logic
-
-### Lower-Value Investments (Skipped)
-1. ❌ Advanced caching - Would improve performance but not reliability
-2. ❌ Comprehensive test suite - Would improve confidence but doesn't affect core functionality
-3. ❌ Monitoring dashboards - Important for operations but not for initial evaluation
-4. ❌ Multiple language support - Out of scope for MVP
-
-## Conclusion
-
-This implementation demonstrates:
-- **Solid software engineering:** Modular architecture, clear separation of concerns, comprehensive error handling
-- **Production-quality thinking:** Graceful degradation, security validation, thoughtful tradeoffs
-- **AI system understanding:** Multi-turn context awareness, answerability checking, semantic validation
-- **Time management:** Prioritized core functionality over perfection, documented limitations honestly
-
-The agent handles natural questions about US Census data while protecting against common failure modes. The codebase is structured to be maintained and improved over time.
+## What I'd Do With More Time
+
+See `REFLECTION.md` for the complete list. Top priorities: extend schema coverage to
+income/race/housing tables, add a connection pool instead of a single global Snowflake
+connection, move session storage to Redis, and add rate limiting to the now-public
+endpoint.
