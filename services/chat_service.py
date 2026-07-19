@@ -34,7 +34,17 @@ class ChatService:
             
             # Step 2: Generate SQL query
             sql_query = self.query_gen.generate_query(user_message, conversation_history)
-            
+
+            if sql_query == 'ERROR_CITY_NOT_SUPPORTED':
+                return {
+                    'response': "This dataset only has population data at the state and county "
+                               "level - it doesn't include individual cities or towns. If you "
+                               "meant a specific place (for example, Springfield exists in over "
+                               "30 states), try asking about the state or county it's in instead "
+                               "(e.g. \"population of Sangamon County, Illinois\" for Springfield, IL).",
+                    'query_executed': False
+                }
+
             if not sql_query or sql_query.lower().startswith('error'):
                 return {
                     'response': "I wasn't able to construct a valid query for that question. "

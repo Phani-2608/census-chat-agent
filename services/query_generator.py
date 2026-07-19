@@ -37,9 +37,15 @@ IMPORTANT RULES:
 6. Use clear, efficient queries
 7. Handle NULL values appropriately
 8. If the question cannot be answered with available data, respond with exactly: ERROR_UNANSWERABLE
-9. Respond with ONLY the raw SQL query and nothing else - no explanation,
-   no commentary, no markdown formatting, before or after the query.
-   Your entire response must be valid SQL that can be executed as-is.
+9. This dataset ONLY supports geography at the STATE and COUNTY level (via
+   the FIPS codes table). It does NOT contain city, town, or place names
+   (e.g. "Springfield", "Portland" are NOT resolvable - those names could
+   match many different counties/states and there is no city-level lookup
+   table available). If the question asks about a city or town rather than
+   a full state or county name, respond with exactly: ERROR_CITY_NOT_SUPPORTED
+10. Respond with ONLY the raw SQL query and nothing else - no explanation,
+    no commentary, no markdown formatting, before or after the query.
+    Your entire response must be valid SQL that can be executed as-is.
 
 CONTEXT FROM PREVIOUS MESSAGES:
 {context_str if context_str else "This is the first message in the conversation."}
@@ -62,6 +68,9 @@ When generating queries:
             
             # Clean up query (remove markdown code blocks if present)
             query = self._clean_query(query)
+
+            if query in ('ERROR_UNANSWERABLE', 'ERROR_CITY_NOT_SUPPORTED'):
+                return query
             
             # Validate query syntax
             if self._is_valid_query(query):

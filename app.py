@@ -29,6 +29,11 @@ data_validator = None
 error_handler = ErrorHandler()
 
 def init_services():
+    """Initialize external service connections (Snowflake, Claude).
+    Does NOT raise on failure - the app should still start and respond
+    to users even if a dependency is temporarily unavailable, per the
+    graceful degradation requirement. Failed init is retried lazily on
+    the next request via ensure_services_ready()."""
     global chat_service, data_validator
     try:
         chat_service = ChatService()
@@ -36,7 +41,19 @@ def init_services():
         logger.info("Services initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize services: {str(e)}")
-        raise
+        chat_service = None
+        data_validator = None
+
+
+def ensure_services_ready() -> bool:
+    """Check if services are initialized; retry once if not.
+    Returns True if ready, False if still unavailable."""
+    global chat_service, data_validator
+    if chat_service is not None and data_validator is not None:
+        return True
+    logger.info("Services not ready, attempting to reconnect...")
+    init_services()
+    return chat_service is not None and data_validator is not None
 
 @app.before_request
 def before_request():
@@ -62,6 +79,14 @@ def chat():
     Preserves conversation context across turns.
     """
     try:
+        if not ensure_services_ready():
+            return error_handler.format_error(
+                "I'm having trouble connecting to the census data source right now. "
+                "This is usually temporary - please try again in a few minutes.",
+                503,
+                'SERVICE_UNAVAILABLE'
+            )
+
         data = request.get_json()
         
         if not data or 'message' not in data:
@@ -188,12 +213,14 @@ def internal_error(error):
         'INTERNAL_ERROR'
     )
 
+# Initialize services at module import time. This must happen here (not
+# only inside the __main__ block below) because production servers like
+# gunicorn import this module rather than executing it directly, so any
+# __main__-only code never runs under gunicorn - this caused chat_service
+# and data_validator to stay None in the deployed environment.
+init_services()
+
 if __name__ == '__main__':
-    try:
-        init_services()
-        port = int(os.getenv('PORT', 5000))
-        debug = os.getenv('FLASK_ENV') == 'development'
-        app.run(host='0.0.0.0', port=port, debug=debug)
-    except Exception as e:
-        logger.error(f"Failed to start application: {str(e)}")
-        raise
+    port = int(os.getenv('PORT', 5000))
+    debug = os.getenv('FLASK_ENV') == 'development'
+    app.run(host='0.0.0.0', port=port, debug=debug)
