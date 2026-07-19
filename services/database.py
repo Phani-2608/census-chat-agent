@@ -40,34 +40,58 @@ class SnowflakeDB:
         """
         Execute SQL query with timeout.
         Returns list of dictionaries or None if query fails.
+
+        Keeps one persistent Snowflake connection alive for the app's
+        lifetime rather than reconnecting per-request. That connection
+        can go stale after the app has been running a while (session
+        timeout, idle disconnect). This detects that, reconnects once,
+        and retries the query before giving up - the user should never
+        see a stale-connection failure as a false 'no data found'.
         """
+        return self._execute_with_retry(query, timeout, allow_retry=True)
+
+    def _execute_with_retry(self, query: str, timeout: int, allow_retry: bool) -> Optional[List[Dict[str, Any]]]:
         cursor = None
         try:
             if not self.connection:
                 self._connect()
-            
+
             cursor = self.connection.cursor(DictCursor)
-            
-            # Set query timeout
+
             start_time = time.time()
-            
+
             logger.info(f"Executing query: {query[:100]}...")
             cursor.execute(query)
-            
-            # Fetch results
+
             results = cursor.fetchall()
-            
+
             elapsed = time.time() - start_time
             logger.info(f"Query completed in {elapsed:.2f} seconds. Results: {len(results)} rows")
-            
-            # Check if query exceeded timeout
+
             if elapsed > 60:
                 logger.warning(f"Query took {elapsed:.2f} seconds (exceeded 60s threshold)")
-            
+
             return results
-            
-        except snowflake.connector.errors.DatabaseError as e:
-            logger.error(f"Database error executing query: {str(e)}")
+
+        except (snowflake.connector.errors.DatabaseError,
+                snowflake.connector.errors.OperationalError) as e:
+            if allow_retry:
+                logger.warning(
+                    f"Query failed, likely a stale connection ({str(e)[:150]}). "
+                    f"Reconnecting and retrying once..."
+                )
+                if cursor:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
+                try:
+                    self._connect()
+                    return self._execute_with_retry(query, timeout, allow_retry=False)
+                except Exception as reconnect_error:
+                    logger.error(f"Reconnect attempt also failed: {str(reconnect_error)}")
+                    return None
+            logger.error(f"Database error executing query (after retry): {str(e)}")
             return None
         except snowflake.connector.errors.ProgrammingError as e:
             logger.error(f"Query syntax error: {str(e)}")
@@ -79,7 +103,7 @@ class SnowflakeDB:
             if cursor:
                 try:
                     cursor.close()
-                except:
+                except Exception:
                     pass
     
     def test_connection(self) -> bool:
