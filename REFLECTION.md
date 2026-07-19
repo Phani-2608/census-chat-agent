@@ -125,6 +125,16 @@ a quick demo with fake data run once on a laptop.
     1. Fix: reduced to a single worker (appropriate for this app's scale anyway) and
     waited for Snowflake's lockout to clear.
 
+11. **Casual abbreviations rejected as off-topic on the very first message.** Found
+    through my own adversarial testing in a fresh incognito window (no session, no
+    prior context) - "pop of florida" was rejected by the topic filter, since it
+    only recognized the full word "population," not the common abbreviation "pop,"
+    and there was no prior conversation context to fall back on. Fix: added "pop" as
+    a recognized synonym, switching the keyword matcher from plain substring checks
+    to word-boundary regex matching so the short token "pop" can't accidentally
+    match inside unrelated words like "popular." Verified with a specific test for
+    that false-positive case before shipping the fix.
+
 ## What I Would Improve With More Time
 
 1. **Broader data coverage.** The app currently only "knows" about the core population
