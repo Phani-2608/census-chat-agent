@@ -8,7 +8,7 @@ class DataValidator:
     def __init__(self):
         # Keywords that indicate census/demographic topics
         self.census_keywords = {
-            'population', 'demographic', 'census', 'state', 'county', 'city',
+            'population', 'pop', 'demographic', 'census', 'state', 'county', 'city',
             'age', 'gender', 'race', 'ethnicity', 'income', 'education',
             'household', 'housing', 'urban', 'rural', 'region', 'district',
             'residents', 'inhabitants', 'statistics', 'data', 'percent',
@@ -113,10 +113,14 @@ class DataValidator:
         return False
     
     def _count_keyword_matches(self, message: str, keywords: set) -> int:
-        """Count how many keywords appear in message"""
+        """Count how many keywords appear in message. Uses word-boundary
+        matching (not plain substring) so short tokens like 'pop' or 'us'
+        only match as whole words - e.g. 'pop' won't match inside
+        'popular', and 'us' won't match inside 'discuss'."""
         count = 0
         for keyword in keywords:
-            if keyword in message:
+            pattern = r'\b' + re.escape(keyword) + r'\b'
+            if re.search(pattern, message):
                 count += 1
         return count
     
